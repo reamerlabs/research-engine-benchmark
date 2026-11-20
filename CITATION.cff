@@ -10,10 +10,10 @@ authors:
     given-names: Chaitanya
     orcid: https://orcid.org/0000-0003-0173-0067
     affiliation: Reamer Labs
-url: https://github.com/j0osman/research-engine-benchmark
+url: https://github.com/reamerlabs/research-engine-benchmark
 date-released: 2026-10-26
 license: CC-BY-4.0
-repository-code: https://github.com/j0osman/research-engine-benchmark
+repository-code: https://github.com/reamerlabs/research-engine-benchmark
 keywords:
   - backtesting
   - benchmark
