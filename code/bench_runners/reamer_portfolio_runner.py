@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """Runs one Reamer Research multi-asset backtest (N tickers on one aligned
 timeline, one on_bar call per step with every ticker visible) through the
-ctypes reference binding and prints a single JSON result line to stdout.
+`reamer_research` Python package and prints a single JSON result line to stdout.
 Counterpart to backtrader_portfolio_runner.py / nautilus_portfolio_runner.py
 / lean_portfolio_runner.py.
 
 Usage: reamer_portfolio_runner.py <bin_dir> <n_tickers> <minimal|realistic>
 
-Same environment as reamer_runner.py: PYTHONPATH=<reamer-research>/reference-python
-and REAMER_RESEARCH_LIB (REAMER_BENCH_TEST_LICENSE=1 for the test-licence build).
+Same environment as reamer_runner.py: the kit's wheel, 4.10.0 or later. Several
+tickers need a licence; Evaluation Mode runs one ticker per backtest.
+
+Updated 2026-11-20 for the 4.10+ package. The published results were produced
+by the 4.6.0 version of this file at commit aa2eae4.
 """
 import json
-import os
 import resource
 import sys
 import time
@@ -22,8 +24,7 @@ import numpy as np
 
 T0 = time.perf_counter()
 
-from reamer_research_binding import run_backtest
-from engine.orders import buy_market, sell_market
+import reamer_research as rr
 
 CHANNEL = 20
 SIZE = 1000.0
@@ -70,9 +71,9 @@ def make_strategy(tickers, strat_name):
                         self.target[t] = -SIZE
                     position = data.position(t)
                     if position < self.target[t]:
-                        out.append(buy_market(self.target[t] - position, ticker=t))
+                        out.append(rr.buy_market(self.target[t] - position, ticker=t))
                     elif position > self.target[t]:
-                        out.append(sell_market(position - self.target[t], ticker=t))
+                        out.append(rr.sell_market(position - self.target[t], ticker=t))
                 highs.append(high)
                 lows.append(low)
             return out or None
@@ -82,10 +83,7 @@ def make_strategy(tickers, strat_name):
 
 def load_bars(path):
     raw = np.fromfile(path, dtype=BAR_DTYPE)
-    bars = np.zeros(len(raw), dtype=[
-        ("ts", "i8"), ("open", "f8"), ("high", "f8"), ("low", "f8"),
-        ("close", "f8"), ("volume", "f8"), ("notional", "f8"), ("tick_count", "i8"),
-    ])
+    bars = np.zeros(len(raw), dtype=rr.BAR_DTYPE)
     for f in BAR_DTYPE.names:
         bars[f] = raw[f]
     bars["tick_count"] = -1
@@ -94,10 +92,6 @@ def load_bars(path):
 
 def main():
     bin_dir, n_tickers, strat_name = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-    if os.environ.get("REAMER_BENCH_TEST_LICENSE") == "1":
-        from tests.license_fixture import setup_test_license
-        setup_test_license()
-
     tickers = [f"T{i:03d}" for i in range(n_tickers)]
     bars = {t: load_bars(Path(bin_dir) / f"{t}.bin") for t in tickers}
     config = {
@@ -114,10 +108,11 @@ def main():
     }
 
     t_run = time.perf_counter()
-    result = run_backtest(make_strategy(tickers, strat_name), config, bars)
+    try:
+        result = rr.backtest(make_strategy(tickers, strat_name), bars, **config)
+    except rr.EvaluationLimit as e:
+        sys.exit(str(e))
     run_s = time.perf_counter() - t_run
-    if not result:
-        sys.exit("run_backtest failed")
 
     print(json.dumps({
         "engine": "reamer_research_py",

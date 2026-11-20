@@ -177,8 +177,35 @@ peak memory, as the published runs did.
   The steps are in the header of [`lean_runner.py`](code/bench_runners/lean_runner.py).
   The script looks for the engine at `../tests/stress/lean_engine` relative to
   this directory.
-- **Reamer Research** needs the library from the 30-day trial kit at
-  [reamerlabs.com](https://reamerlabs.com). No binary is in this repository.
+- **Reamer Research** runs from the kit's prebuilt Python wheel and C++ header,
+  4.10.0 or later, from the [free download](https://reamerlabs.com/download).
+  No binary is in this repository. See [Rerun Reamer Research](#rerun-reamer-research).
+
+### Rerun Reamer Research
+
+The runners call the kit's supported Python package (`import reamer_research`)
+and C++ header (`reamer_research.hpp`). With `KIT` set to the unpacked kit, and
+the `data/` files built as above:
+
+```sh
+.venv/bin/pip install "$KIT"/python/reamer_research-*.whl
+$PY code/bench_runners/reamer_runner.py data/t500000.bin realistic
+
+c++ -std=c++20 -O2 code/bench_runners/reamer_cpp_runner.cpp -I"$KIT/include" \
+    -L"$KIT/lib" -lreamer_research -Wl,-rpath,"$KIT/lib" -o reamer_cpp_runner
+./reamer_cpp_runner data/t500000.bin realistic
+
+$PY code/bench_runners/build_portfolio_dataset.py data/base.bin 35064 10 data/p10 bin
+$PY code/bench_runners/reamer_portfolio_runner.py data/p10 10 realistic
+```
+
+Without a licence the engine runs in Evaluation Mode: one ticker, over at most
+30 days of bars or 50,000 bars per backtest. The published tiers are larger,
+so they stop with an evaluation-limit message that names the limit. To try
+the runners on the free download, build a tier that fits, such as
+`build_dataset.py data/base.bin 2000 data/t2000.bin bin` (about 21 days of the
+synthetic series). A [Reamer Research licence](https://reamerlabs.com/pricing)
+removes the limits.
 
 ## What is here
 
@@ -202,6 +229,17 @@ Only `README.md`, `CITATION.cff`, `LICENSE`, `.gitignore`, `docs/`,
 `code/bench_runners/make_synthetic_base.py` and
 `code/lean_project/LICENSE-APACHE-2.0.txt` were added after the run. Everything listed
 in `SHA256SUMS` is the run's unedited output.
+
+The three Reamer Research runners (`reamer_runner.py`,
+`reamer_portfolio_runner.py`, `reamer_cpp_runner.cpp`) were updated on
+20 November 2026 for the 4.10+ Python package and C++ header, keeping the
+workloads, settings and JSON output. The versions that produced the published
+results, against 4.6.0's reference binding, are the ones `SHA256SUMS`
+describes, at commit `aa2eae4`:
+
+```sh
+git show aa2eae4:code/bench_runners/reamer_runner.py
+```
 
 **Reading the JSONL.** Each run row has `suite`, `variant` (`reamer_cpp`,
 `reamer_py`, `backtrader`, `nautilus`, `nautilus_p`, `lean`), `strategy`, the

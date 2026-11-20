@@ -1,14 +1,24 @@
-// Runs one Reamer Research backtest through the C++ reference wrapper and
-// prints a single JSON result line to stdout. Compiled counterpart to
-// reamer_runner.py: same .bin dataset, same minimal and 20-bar Donchian
-// workloads, same target-position logic.
+// Runs one Reamer Research backtest through the kit's C++ header
+// (cpp/include/reamer_research.hpp, 4.10.0 or later) and prints a single JSON
+// result line to stdout. Compiled counterpart to reamer_runner.py: same .bin
+// dataset, same minimal and 20-bar Donchian workloads, same target-position
+// logic.
 //
 // Usage: reamer_cpp_runner <bin_path> <minimal|realistic>
 //
-// Build:
-//   g++ -O2 -std=c++20 -Ireference-cpp/include -Istrategy/abi \
-//       bench/comparison/bench_runners/reamer_cpp_runner.cpp \
-//       -Lbuild -lreamer_research -Wl,-rpath,$PWD/build -o build/reamer_cpp_runner
+// Build, from this directory, with KIT set to the unpacked kit:
+//   c++ -std=c++20 -O2 reamer_cpp_runner.cpp -I"$KIT/include" -L"$KIT/lib"
+//       -lreamer_research -Wl,-rpath,"$KIT/lib" -o reamer_cpp_runner
+// (one command, split here for width)
+// (CMake's find_package(ReamerResearch 4) and pkg-config reamer-research also
+// work; see the kit's cpp/README.md.)
+//
+// Without a licence the engine runs in Evaluation Mode (one ticker, at most
+// 30 days of bars or 50,000 bars) and the published tiers stop with an
+// evaluation-limit error; a licence removes the limits.
+//
+// Updated 2026-11-20 for the 4.10+ header. The published results were
+// produced by the 4.6.0 version of this file at commit aa2eae4.
 
 #include <reamer_research.hpp>
 
@@ -19,8 +29,10 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
-#include <span>
+#include <optional>
 #include <vector>
+
+namespace rr = reamer_research;
 
 namespace {
 
@@ -30,6 +42,39 @@ constexpr double kSize = 1000.0;
 struct RawBar {  // 48-byte record written by build_dataset.py
   int64_t ts;
   double open, high, low, close, volume;
+};
+
+// 20-bar Donchian breakout over the 20 bars before the current one, moving
+// the position to +/-1000 with one order sized to reverse.
+struct Realistic {
+  size_t lookback = 1;
+  double highs[kChannel] = {}, lows[kChannel] = {};
+  size_t seen = 0;
+  double target = 0.0;
+
+  void on_bar(rr::Data& d) {
+    const double high = d.high().back(), low = d.low().back(), close = d.close().back();
+    if (seen >= kChannel) {
+      const double hi = *std::max_element(highs, highs + kChannel);
+      const double lo = *std::min_element(lows, lows + kChannel);
+      if (close > hi && target <= 0) target = kSize;
+      else if (close < lo && target >= 0) target = -kSize;
+      const double position = d.position();
+      if (position < target) d.buy_market(target - position);
+      else if (position > target) d.sell_market(position - target);
+    }
+    highs[seen % kChannel] = high;
+    lows[seen % kChannel] = low;
+    ++seen;
+  }
+};
+
+struct Minimal {
+  size_t lookback = 1;
+  void on_bar(rr::Data& d) {
+    volatile double c = d.close().back();
+    (void)c;
+  }
 };
 
 }  // namespace
@@ -43,12 +88,16 @@ int main(int argc, char* argv[]) {
   const bool realistic = std::strcmp(argv[2], "realistic") == 0;
 
   std::ifstream in(argv[1], std::ios::binary | std::ios::ate);
+  if (!in) {
+    std::fprintf(stderr, "cannot open %s\n", argv[1]);
+    return 1;
+  }
   const size_t n = static_cast<size_t>(in.tellg()) / sizeof(RawBar);
   std::vector<RawBar> raw(n);
   in.seekg(0);
   in.read(reinterpret_cast<char*>(raw.data()), n * sizeof(RawBar));
 
-  std::vector<ReamerOhlcvBar> bars(n);
+  rr::Bars bars(n);
   for (size_t i = 0; i < n; ++i) {
     bars[i].ts = raw[i].ts;
     bars[i].open = raw[i].open;
@@ -60,71 +109,22 @@ int main(int argc, char* argv[]) {
     bars[i].tick_count = -1;
   }
 
-  // Ring buffers of the 20 bars before the current one.
-  double highs[kChannel], lows[kChannel];
-  size_t seen = 0;
-  double target = 0.0;
-
-  auto on_bar = [&](std::span<const ReamerOhlcvBar> window, size_t /*ticker_count*/,
-                    std::span<const double> positions,
-                    std::span<const uint8_t> /*window_valid*/,
-                    std::span<const ReamerPositionState> /*position_states*/,
-                    std::span<const ReamerOpenOrder> /*open_orders*/,
-                    std::span<ReamerOrderRequest> out_orders,
-                    std::span<ReamerOrderAction> /*out_actions*/,
-                    size_t& /*action_count*/) -> size_t {
-    const ReamerOhlcvBar& bar = window.back();
-    if (!realistic) {
-      volatile double c = bar.close;
-      (void)c;
-      return 0;
-    }
-    size_t count = 0;
-    if (seen >= kChannel) {
-      const double hi = *std::max_element(highs, highs + kChannel);
-      const double lo = *std::min_element(lows, lows + kChannel);
-      if (bar.close > hi && target <= 0) target = kSize;
-      else if (bar.close < lo && target >= 0) target = -kSize;
-
-      const double position = positions[0];
-      if (position != target && !out_orders.empty()) {
-        const bool buy = position < target;
-        ReamerOrderRequest order = {};
-        order.ticker_id = 0;
-        order.order_type = buy ? REAMER_RESEARCH_ORDER_TYPE_BUY : REAMER_RESEARCH_ORDER_TYPE_SELL;
-        order.kind = REAMER_RESEARCH_ORDER_KIND_MARKET;
-        order.side = buy ? REAMER_RESEARCH_SIDE_BUY : REAMER_RESEARCH_SIDE_SELL;
-        order.tif = REAMER_RESEARCH_TIF_GTC;
-        order.valid = true;
-        order.qty = buy ? target - position : position - target;
-        out_orders[0] = order;
-        count = 1;
-      }
-    }
-    highs[seen % kChannel] = bar.high;
-    lows[seen % kChannel] = bar.low;
-    ++seen;
-    return count;
-  };
-
-  ReamerBacktestConfig config = {};
-  config.commission_mode = REAMER_RESEARCH_COMMISSION_ROUND_TRIP;
-  config.ohlcv_type = REAMER_RESEARCH_OHLCV_BID;
-  config.rng_seed = 42;
-  config.roll_days_before_monthend = 5;
-
-  std::vector<std::vector<ReamerOhlcvBar>> bars_by_ticker;
-  bars_by_ticker.push_back(std::move(bars));
+  // Every cost is zero and the defaults match the published configuration:
+  // round-trip commission mode, bid bars, seed 42, roll 5 days before month end.
+  const rr::Options options{.initial_capital = 10'000'000.0, .leverage = 1.0, .rng_seed = 42};
+  const rr::Universe universe{{"BENCH", std::move(bars)}};
 
   const auto t_run = std::chrono::steady_clock::now();
-  auto result = reamer_research_ref::run_backtest(
-      bars_by_ticker, {"BENCH"}, on_bar, config, 10'000'000.0, 1.0, 1);
-  const auto t_end = std::chrono::steady_clock::now();
-  if (!result) {
-    std::fprintf(stderr, "run_backtest failed\n");
+  std::optional<rr::Result> result;
+  try {
+    result.emplace(realistic ? rr::backtest(Realistic{}, universe, options)
+                             : rr::backtest(Minimal{}, universe, options));
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "%s\n", e.what());
     return 1;
   }
-  const auto summary = result->summary();
+  const auto t_end = std::chrono::steady_clock::now();
+  const auto& summary = result->summary();
 
   rusage ru{};
   getrusage(RUSAGE_SELF, &ru);

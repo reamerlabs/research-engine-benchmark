@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""Runs one Reamer Research backtest through the ctypes reference binding
-and prints a single JSON result line to stdout. Isolated in its own process
-(invoked via subprocess by backtrader_comparison_bench.py) so peak-RSS
-measurement is clean per engine.
+"""Runs one Reamer Research backtest through the `reamer_research` Python
+package and prints a single JSON result line to stdout. Isolated in its own
+process so peak-RSS measurement is clean per engine.
 
 Usage: reamer_runner.py <bin_path> <minimal|realistic>
 
-Needs PYTHONPATH=<reamer-research>/reference-python and REAMER_RESEARCH_LIB
-pointing at libreamer_research.so (or the test-licence build, in which case
-REAMER_BENCH_TEST_LICENSE=1 sets up the bypass licence).
+Needs the Reamer Research kit's wheel (4.10.0 or later):
+  pip install <kit>/python/reamer_research-*.whl
+Without a licence the engine runs in Evaluation Mode (one ticker, at most 30
+days of bars or 50,000 bars), which raises rr.EvaluationLimit on the
+published tiers; a licence removes the limits.
+
+Updated 2026-11-20 for the 4.10+ package. The published results were produced
+by the 4.6.0 version of this file at commit aa2eae4.
 """
 import json
-import os
 import resource
 import sys
 import time
@@ -21,8 +24,7 @@ import numpy as np
 
 T0 = time.perf_counter()
 
-from reamer_research_binding import run_backtest
-from engine.orders import buy_market, sell_market
+import reamer_research as rr
 
 TICKER = "BENCH"
 CHANNEL = 20
@@ -66,9 +68,9 @@ class RealisticStrategy:
                 self.target = -SIZE
             position = data.position(TICKER)
             if position < self.target:
-                order = buy_market(self.target - position, ticker=TICKER)
+                order = rr.buy_market(self.target - position, ticker=TICKER)
             elif position > self.target:
-                order = sell_market(position - self.target, ticker=TICKER)
+                order = rr.sell_market(position - self.target, ticker=TICKER)
         self.highs.append(high)
         self.lows.append(low)
         return order
@@ -76,15 +78,8 @@ class RealisticStrategy:
 
 def main():
     bin_path, strategy = sys.argv[1], sys.argv[2]
-    if os.environ.get("REAMER_BENCH_TEST_LICENSE") == "1":
-        from tests.license_fixture import setup_test_license
-        setup_test_license()
-
     raw = np.fromfile(bin_path, dtype=BAR_DTYPE)
-    bars = np.zeros(len(raw), dtype=[
-        ("ts", "i8"), ("open", "f8"), ("high", "f8"), ("low", "f8"),
-        ("close", "f8"), ("volume", "f8"), ("notional", "f8"), ("tick_count", "i8"),
-    ])
+    bars = np.zeros(len(raw), dtype=rr.BAR_DTYPE)
     for f in BAR_DTYPE.names:
         bars[f] = raw[f]
     bars["tick_count"] = -1
@@ -104,10 +99,11 @@ def main():
     strat_cls = MinimalStrategy if strategy == "minimal" else RealisticStrategy
 
     t_run = time.perf_counter()
-    result = run_backtest(strat_cls, config, {TICKER: bars})
+    try:
+        result = rr.backtest(strat_cls, {TICKER: bars}, **config)
+    except rr.EvaluationLimit as e:
+        sys.exit(str(e))
     run_s = time.perf_counter() - t_run
-    if not result:
-        sys.exit("run_backtest failed")
 
     print(json.dumps({
         "engine": "reamer_research_py",
